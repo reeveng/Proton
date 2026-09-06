@@ -320,6 +320,45 @@ static BOOL should_use_shell_execute(WCHAR *cmdline)
     return use_shell_execute;
 }
 
+static BOOL ea_desktop_installed(void)
+{
+    DWORD attr = GetFileAttributesW( L"C:\\Program Files\\Electronic Arts\\EA Desktop" );
+
+    return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+static BOOL try_install_eadesktop(void)
+{
+    static WCHAR cmdline[] = L"\"__Installer\\Origin\\redist\\internal\\EAappInstaller.exe\""
+                             L" /quiet EAX_LAUNCH_CLIENT=0 IGNORE_INSTALLED=1";
+    static const WCHAR installer[] = L"__Installer\\Origin\\redist\\internal\\EAappInstaller.exe";
+    PROCESS_INFORMATION pi;
+    STARTUPINFOW si = { 0 };
+    DWORD exit_code;
+
+    si.cb = sizeof(si);
+
+    if (GetFileAttributesW( installer ) == INVALID_FILE_ATTRIBUTES)
+    {
+        TRACE( "No bundled EA app installer at %s.\n", debugstr_w(installer) );
+        return FALSE;
+    }
+
+    if (!CreateProcessW( NULL, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi ))
+    {
+        ERR( "Failed to run EA app installer, err %lu.\n", GetLastError() );
+        return FALSE;
+    }
+
+    WaitForSingleObject( pi.hProcess, INFINITE );
+    if (!GetExitCodeProcess( pi.hProcess, &exit_code )) exit_code = ~0u;
+    CloseHandle( pi.hThread );
+    CloseHandle( pi.hProcess );
+
+    TRACE( "EA app installer exit code %lu.\n", exit_code );
+    return !exit_code && ea_desktop_installed();
+}
+
 static BOOL try_recover_eadesktop_symlink(void)
 {
     WIN32_FIND_DATAA ff;
@@ -612,6 +651,16 @@ run:
             }
             if (game_process && ret == SE_ERR_NOASSOC && link2ea)
             {
+                /* The game's own install script runs the bundled EA app installer without a
+                 * display mode, so it waits on a window which is never seen in Game Mode and
+                 * the handler is never registered. Install it here instead. */
+                if (!ea_desktop_installed())
+                {
+                    if (!try_install_eadesktop()) break;
+                    if (retry_count++) break;
+                    continue;
+                }
+
                 /* Try to uninstall EA desktop so it is set up from prerequisites on the next run. */
                 UINT ret = MsiConfigureProductExW( L"{C2622085-ABD2-49E5-8AB9-D3D6A642C091}", 0,
                                                    INSTALLSTATE_DEFAULT, L"REMOVE=ALL" );
